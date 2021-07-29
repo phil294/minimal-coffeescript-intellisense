@@ -1,38 +1,14 @@
-# LSP Example
-
-Heavily documented sample code for https://code.visualstudio.com/api/language-extensions/language-server-extension-guide
+# CoffeeScript IntelliSense Extension using tsserver
 
 ## Functionality
 
-This Language Server works for plain text file. It has the following language features:
-- Completions
-- Diagnostics regenerated on each file change or configuration change
+This extension provides Intellisense for CoffeeScript. This works not by leveraging CS AST but by compiling it to JS and asking tsserver for completions, diagnostics etc., while mapping the results using source maps.
 
-It also includes an End-to-End test.
+Although this works great in principle, there are limitations to this approach:
+- No complex source code altering features can be implemented like refactoring, formatting, snippets
+- Local context can sometimes be missing in autocompletion (TODO explain this)
 
-## Structure
+Overall, the following features of the Language Server Protocol are implemented:
+TODO
 
-```
-.
-├── client // Language Client
-│   ├── src
-│   │   ├── test // End to End tests for Language Client / Server
-│   │   └── extension.ts // Language Client entry point
-├── package.json // The extension manifest.
-└── server // Language Server
-    └── src
-        └── server.ts // Language Server entry point
-```
-
-## Running the Sample
-
-- Run `npm install` in this folder. This installs all necessary npm modules in both the client and server folder
-- Open VS Code on this folder.
-- Press Ctrl+Shift+B to compile the client and server.
-- Switch to the Debug viewlet.
-- Select `Launch Client` from the drop down.
-- Run the launch config.
-- If you want to debug the server as well use the launch configuration `Attach to Server`
-- In the [Extension Development Host] instance of VSCode, open a document in 'plain text' language mode.
-  - Type `j` or `t` to see `Javascript` and `TypeScript` completion.
-  - Enter text content such as `AAA aaa BBB`. The extension will emit diagnostics for all words in all-uppercase.
+TODO rewrite this extension using coffeescript, proving its potential usefulness
