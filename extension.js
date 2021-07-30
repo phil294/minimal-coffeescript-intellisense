@@ -1,5 +1,5 @@
 //@ts-check
-const { commands, ExtensionContext, languages, Position, Range, Uri, workspace, CompletionList, Diagnostic, DiagnosticSeverity, window } = require('vscode')
+const { commands, ExtensionContext, languages, Position, Range, Uri, workspace, CompletionList, Diagnostic, DiagnosticSeverity, window, TextDocumentChangeEvent } = require('vscode')
 const CoffeeScript = require('coffeescript')
 //@ts-ignore
 const VolatileMap = require('volatile-map').default
@@ -72,8 +72,9 @@ async function ts_compile(text) {
 			compilerOptions: {
 				allowJs: true,
 				alwaysStrict: true,
-				noImplicitAny: true,
+				// noImplicitAny: true,
 				strictNullChecks: true,
+				target: ts_morph.ScriptTarget.ESNext,
 			}
 		})
 		// Can't easily use `.js` in this library, but `.ts` does the same thing anyway
@@ -103,10 +104,11 @@ function activate(/** @type {ExtensionContext} */ { subscriptions }) {
 
 	const virtual_document_contents = new Map()
 
-	/* See README for how this extension works.
-	To enable intellisense for compiled output, virtual documents in a custom file scheme
-	are necessary. This approach is based on "Embedded Languages / Request Forwarding" @
-	https://code.visualstudio.com/api/language-extensions/embedded-languages#request-forwarding-sample.
+	/*
+		See README for how this extension works.
+		To enable intellisense for compiled output, virtual documents in a custom file scheme
+		are necessary. This approach is based on "Embedded Languages / Request Forwarding" @
+		https://code.visualstudio.com/api/language-extensions/embedded-languages#request-forwarding-sample.
 	*/
 	subscriptions.push(workspace.registerTextDocumentContentProvider(ext_identifier, {
 		// This is a lookup service that is unfortunately required and otherwise not really interesting
@@ -118,9 +120,10 @@ function activate(/** @type {ExtensionContext} */ { subscriptions }) {
 			return virtual_content
 		}
 	}))
-	subscriptions.push(workspace.onDidChangeTextDocument(change_event => {
-		const active_document = change_event.document
-		if (active_document !== window.activeTextEditor?.document)
+	
+	const check_syntax = () => {
+		const active_document = window.activeTextEditor?.document
+		if(!active_document)
 			return
 		diagnostic_collection.clear()
 		if (coffee_compile_debouncer)
@@ -137,11 +140,6 @@ function activate(/** @type {ExtensionContext} */ { subscriptions }) {
 			ts_compile_debouncer = setTimeout(async () => {
 				const { diagnostics: ts_diagnostics = [] } = await ts_compile(js)
 				for(const d of ts_diagnostics) {
-					// const mapped_start = coffee_source_map?.[d.range.start.line - 1]?.columns[d.range.start.character]
-					// const mapped_end = coffee_source_map?.[d.range.end.line - 1]?.columns[d.range.end.character]
-					// d.range = new Range(
-					// 	new Position(mapped_start?.sourceLine || 0, mapped_start?.sourceColumn || 0),
-					// 	new Position(mapped_end?.sourceLine || 0, mapped_end?.sourceColumn || 0))
 					const mapped_start = coffee_source_map?.[d.range.start.line - 1]?.columns.find(Boolean)
 					const mapped_end = coffee_source_map?.[d.range.end.line - 1]?.columns.find(Boolean)
 					d.range = new Range(
@@ -149,63 +147,75 @@ function activate(/** @type {ExtensionContext} */ { subscriptions }) {
 						new Position(mapped_end?.sourceLine || 0, Number.MAX_VALUE))
 				}
 				diagnostic_collection.set(active_document.uri, ts_diagnostics)
-			}, 1)
+			}, 10)
 		}, 500)
+	}
+	subscriptions.push(workspace.onDidChangeTextDocument(change_event => {
+		const active_document = change_event.document
+		if (active_document !== window.activeTextEditor?.document)
+			return
+		check_syntax()
 	}))
-	subscriptions.push(
-		languages.registerCompletionItemProvider(language, {
-			async provideCompletionItems(document, real_coffee_position, token) {
-				let coffee = document.getText()
-				const current_line = document.lineAt(real_coffee_position.line).text
-				const current_line_indentation = (current_line.match(/^ +/) || [])[0] || ''
+	check_syntax()
 
-				// Proper lsp servers can handle autocompletion requests even when the surrounding code is invalid.
-				// This is not possible with this extension so we first try to compile as is...
-				let compile_result = coffee_compile(coffee)
-				if (!compile_result.js) {
-					// ... and when that failed, replace the current line (indented) with `true` and try again.
-					coffee = [
-						coffee.substr(0, document.offsetAt(real_coffee_position.with(undefined, 0))),
-						current_line_indentation, // < todo test
-						'true',
-						coffee.substr(document.offsetAt(real_coffee_position.with(undefined, current_line.length)))
-					].join('')
-					compile_result = coffee_compile(coffee)
+	subscriptions.push(languages.registerCompletionItemProvider(language, {
+		async provideCompletionItems(document, real_coffee_position, token) {
+			let coffee = document.getText()
+			const current_line = document.lineAt(real_coffee_position.line).text
+			const current_line_indentation = (current_line.match(/^\s+/) || [])[0] || ''
+
+			// Proper lsp servers can handle autocompletion requests even when the surrounding code is invalid.
+			// This is not possible with this extension so we temporarily replace the current line (indented)
+			// with `true`, reverse-map the location of that in the compiled JS (if successful) and insert the
+			// current line again at that position, as JS completion *can* be based on half-baked code
+			coffee = [
+				coffee.substr(0, document.offsetAt(real_coffee_position.with(undefined, 0))),
+				current_line_indentation,
+				'true',
+				coffee.substr(document.offsetAt(real_coffee_position.with(undefined, current_line.length)))
+			].join('')
+			const coffee_true_position = real_coffee_position.with(undefined, current_line_indentation.length)
+			const compile_result = coffee_compile(coffee)
+			if (!compile_result.js || !compile_result.source_map)
+				return
+			const js_true_line = compile_result.source_map
+				.map(line => line?.columns
+					.find(c => c?.sourceLine === coffee_true_position.line && c.sourceColumn === coffee_true_position.character))
+				.flat()
+				.find(Boolean)
+				?.line
+			if(!js_true_line)
+				return
+			const js_arr = compile_result.js.split('\n')
+			js_arr[js_true_line] = current_line
+			const js = js_arr.join('\n')
+			const emulated_cursor_position = new Position(js_true_line, current_line.length)
+
+			const original_uri = document.uri.toString()
+			virtual_document_contents.set(original_uri, js)
+			// The `.js` is what makes vscode turn to tsserver for the completion request
+			const virtual_document_uri = Uri.parse(`${ext_identifier}://compiled/${encodeURIComponent(original_uri)}.js`)
+			// , context.triggerCharacter v todo
+			/** @type {CompletionList|undefined} */
+			const completion_list = await commands.executeCommand('vscode.executeCompletionItemProvider', virtual_document_uri, emulated_cursor_position)
+
+			// Now the completions are there based on JS but their position does not fit to coffee. Complicated backwards
+			// mapping is not necessary as they can all simply be mapped to current coffee cursor position:
+			const real_coffee_position_one_left = real_coffee_position.with(undefined, real_coffee_position.character - 1)
+			for (const item of completion_list?.items || []) {
+				if (item.range instanceof Range) {
+					const range = new Range(real_coffee_position_one_left, real_coffee_position)
+					item.range = range
+					if (item.textEdit)
+						item.textEdit.range = range
+				} else if (item.range?.replacing) {
+					const range = new Range(real_coffee_position, real_coffee_position)
+					item.range.replacing = range
+					item.range.inserting = range
 				}
-				if (!compile_result.js || !compile_result.source_map)
-					return
-
-				// Completion in the JS however *can* be based on invalid code, so we insert the current line again.
-				// It would be better to do this at `real_coffee_position` instead of at the end like below but
-				// this is somewhat tricky, TODO. It would enable local context and is thus very important
-				const js = `${compile_result.js}\n${current_line}`
-				const emulated_cursor_position = new Position(compile_result.source_map.length, current_line.length) // Very end of JS
-
-				const original_uri = document.uri.toString()
-				virtual_document_contents.set(original_uri, js)
-				// The `.js` is what makes vscode turn to tsserver for the completion request
-				const virtual_document_uri = Uri.parse(`${ext_identifier}://compiled/${encodeURIComponent(original_uri)}.js`)
-				// , context.triggerCharacter v todo
-				/** @type {CompletionList|undefined} */
-				const completion_list = await commands.executeCommand('vscode.executeCompletionItemProvider', virtual_document_uri, emulated_cursor_position)
-
-				// Now the completions are there based on JS but their position does not fit to coffee. Complicated backwards
-				// mapping is not necessary as they can all simply be mapped to current coffee cursor position:
-				const real_coffee_position_one_left = real_coffee_position.with(undefined, real_coffee_position.character - 1)
-				for (const item of completion_list?.items || []) {
-					if (item.range instanceof Range) {
-						const range = new Range(real_coffee_position_one_left, real_coffee_position)
-						item.range = range
-						if (item.textEdit)
-							item.textEdit.range = range
-					} else if (item.range?.replacing) {
-						const range = new Range(real_coffee_position, real_coffee_position)
-						item.range.replacing = range
-						item.range.inserting = range
-					}
-				}
-				return completion_list?.items
 			}
-		}, '.', '\"'))
+			return completion_list?.items
+		}
+	}, '.', '\"'))
 }
 module.exports = { activate }

@@ -27,6 +27,5 @@ Although this works great in principle, there are limitations to this approach:
 
 Not yet implemented but possible in principle:
 - Cross-file autocompletion: Import autocompletion works if the imported module is native JavaScript. If you are trying to import from another CS file, that file won't be compiled and parsed yet
-- Local context autocompletion: Autocomplete is currently only based on global (editor-wide) declarations, so you cannot get autocomplete for object members, class members, function parameters etc. This has high priority but is not done yet
 
 TODO rewrite this extension using coffeescript, proving its potential usefulness
