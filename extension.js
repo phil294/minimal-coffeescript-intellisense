@@ -123,7 +123,7 @@ function activate(/** @type {ExtensionContext} */ { subscriptions }) {
 	
 	const check_syntax = () => {
 		const active_document = window.activeTextEditor?.document
-		if(!active_document)
+		if(!active_document || active_document.languageId !== language)
 			return
 		diagnostic_collection.clear()
 		if (coffee_compile_debouncer)
