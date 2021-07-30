@@ -1,17 +1,19 @@
 {
 	"compilerOptions": {
-	  "allowJs": true,
-	  "checkJs": true,
-	  "module": "commonjs",
-	  "noImplicitAny": true,
-	  "noImplicitReturns": true,
-	  "noImplicitThis": true,
-	  "strictNullChecks": true,
-	  "alwaysStrict": true,
-	  "strictBindCallApply": true,
-	  "strictFunctionTypes": true,
-	  "strictPropertyInitialization": true,
-	  "noEmit": true
-	}
-  }
-  
+		"allowJs": true,
+		"checkJs": true,
+		"module": "commonjs",
+		"noImplicitAny": true,
+		"noImplicitReturns": true,
+		"noImplicitThis": true,
+		"strictNullChecks": true,
+		"alwaysStrict": true,
+		"strictBindCallApply": true,
+		"strictFunctionTypes": true,
+		"strictPropertyInitialization": true,
+		"noEmit": true
+	},
+	"exclude": [
+		"node_modules",
+	],
+}
