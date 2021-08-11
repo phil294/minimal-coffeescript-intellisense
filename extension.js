@@ -1,34 +1,49 @@
 //@ts-check
+
 const { commands, ExtensionContext, languages, Position, Range, Uri, workspace, CompletionList, Diagnostic, DiagnosticSeverity, window, TextDocumentChangeEvent } = require('vscode')
+const { LanguageClient, TransportKind } = require('vscode-languageclient/node')
 const CoffeeScript = require('coffeescript')
 //@ts-ignore
 const VolatileMap = require('volatile-map').default
 //@ts-ignore
 const MD5 = new (require('jshashes').MD5)()
 const ts_morph = require('ts-morph')
+const path = require('path')
 
 const language = 'coffeescript'
 const ext_identifier = 'coffeescript-intellisense-js-based'
 
 /** @type {NodeJS.Timeout} */
 let coffee_compile_debouncer
-/** @type {NodeJS.Timeout} */
-let ts_compile_debouncer
 
 /** @type {Map<string,ReturnType<coffee_compile>>} */
-const compilation_cache = new VolatileMap(60000)
+const compilation_cache = new VolatileMap(180000)
 
 /** @type {ts_morph.Project} */
 let ts_project
 /** @type {ts_morph.SourceFile} */
 let ts_source_file
 
+/** @type {LanguageClient} */
+let client
+
+/*******************************************************
+ * 
+ * This extension uses coffeescript compiler for CS compilation errors and
+ * transforming into JS,
+ * uses request forwarding to vsc ts service for JS completions,
+ * ts-morph for JS syntax checking,
+ * theia-language-server (TS) for JS gotos only (treating CS as JS).
+ * 
+ * Please use https://github.com/phil294/coffeesense instead of this extension.
+ *
+ ******************************************************/
+
 /**
  * Attempts to compile and return js and sourceMap, or, if failing to do so,
  * compile error diagnostics. Caches results for several seconds.
  * @param text {string}
- * returns {{ diagnostics?: Diagnostic[], js?: string, source_map?: CoffeeScript.LineMap[] }}
- * @returns {{diagnostics?: Diagnostic[], js?: string, source_map?: Array<{line:number,columns:Array<{line:number,column:number,sourceLine:number,sourceColumn:number}|undefined>}|undefined>}} TODO wrong in repo bc columns is not array?
+ * @returns {{ diagnostics?: Diagnostic[], js?: string, source_map?: CoffeeScript.LineMap[] }}
  */
 function coffee_compile(text) {
 	const hash = MD5.hex(text)
@@ -37,7 +52,6 @@ function coffee_compile(text) {
 		return cached
 	let result
 	try {
-		/** @type {any} TODO **/
 		const response = CoffeeScript.compile(text, { sourceMap: true, bare: true })
 		result = {
 			source_map: response.sourceMap.lines,
@@ -55,7 +69,7 @@ function coffee_compile(text) {
 	return result
 }
 /**
- * Compiles ts code into js and returns only diagnostics
+ * Compiles ts code into js and returns only diagnostics. Very slow
  * @param text {string}
  * @returns {Promise<ReturnType<coffee_compile>>}
  */
@@ -82,14 +96,18 @@ async function ts_compile(text) {
 	}
 	ts_source_file.replaceWithText(text)
 	await ts_project.save()
-	// Very slow: https://github.com/dsherret/ts-morph/issues/1182
+	// https://github.com/dsherret/ts-morph/issues/1182
 	const pre_emit_diagnostics = ts_project.getPreEmitDiagnostics()
-	const result = { diagnostics: pre_emit_diagnostics.map(d => {
+	const emit_result = ts_project.emitToMemory()
+	// const emit_diagnostics = emit_result.getDiagnostics()
+	const result = { diagnostics: pre_emit_diagnostics.filter(d =>
+			! d.compilerObject.messageText.toString().startsWith("Cannot find module")
+		).map(d => {
 		const m = d.getMessageText()
 		const message = typeof m === 'string' ? m : m.getMessageText()
 		return new Diagnostic(new Range(
 			// ts-morph only returns line and total pos, not inline character.
-			// Transforming this is annoying so we just highlight the whole line (TODO)
+			// Transforming this is annoying so we just highlight the whole line
 			d.getLineNumber() || 0, 0, d.getLineNumber() || 0, 0
 		), message, DiagnosticSeverity.Error)
 	}) }
@@ -97,7 +115,46 @@ async function ts_compile(text) {
 	return result
 }
 
-function activate(/** @type {ExtensionContext} */ { subscriptions }) {
+function activate(/** @type {ExtensionContext} */ context) {
+	const { subscriptions } = context
+
+	let server_module = context.asAbsolutePath(
+		path.join('node_modules', '.bin', 'typescript-language-server')
+	)
+	let base_server_options = {
+		module: server_module,
+		transport: TransportKind.ipc,
+		options: {
+		},
+	}
+	let server_options = {
+		run: base_server_options,
+		debug: {
+			...base_server_options,
+			options: {
+				...base_server_options.options,
+				execArgv: ['--nolazy', '--inspect=6009'],
+			}
+		}
+	}
+	let client_options = {
+		documentSelector: [{ scheme: 'file', language: 'coffeescript' }],
+		// Disable pretty much everything except go to and completion
+		middleware: {
+			handleDiagnostics: Boolean,
+			provideCodeActions: () => undefined,
+			provideDocumentFormattingEdits: () => undefined,
+			provideOnTypeFormattingEdits: () => undefined,
+			provideRenameEdits: () => undefined,
+			prepareRename: () => undefined,
+			executeCommand: Boolean,
+			provideFoldingRanges: () => undefined,
+			provideLinkedEditingRange: () => undefined,
+		}
+	}
+	client = new LanguageClient(ext_identifier, ext_identifier, server_options, client_options)
+	// Start the client. This will also launch the server
+	client.start()
 
 	const diagnostic_collection = languages.createDiagnosticCollection(ext_identifier)
 	subscriptions.push(diagnostic_collection)
@@ -105,7 +162,6 @@ function activate(/** @type {ExtensionContext} */ { subscriptions }) {
 	const virtual_document_contents = new Map()
 
 	/*
-		See README for how this extension works.
 		To enable intellisense for compiled output, virtual documents in a custom file scheme
 		are necessary. This approach is based on "Embedded Languages / Request Forwarding" @
 		https://code.visualstudio.com/api/language-extensions/embedded-languages#request-forwarding-sample.
@@ -129,25 +185,27 @@ function activate(/** @type {ExtensionContext} */ { subscriptions }) {
 		if (coffee_compile_debouncer)
 			clearTimeout(coffee_compile_debouncer)
 		coffee_compile_debouncer = setTimeout(async () => {
-			const { js, source_map: coffee_source_map, diagnostics: coffee_diagnostics } = coffee_compile(active_document.getText())
-			if (!js) {
+			const { js, source_map, diagnostics: coffee_diagnostics } = coffee_compile(active_document.getText())
+			if (!js || !source_map) {
 				diagnostic_collection.set(active_document.uri, coffee_diagnostics)
 				return
 			}
 
-			if (ts_compile_debouncer)
-				clearTimeout(ts_compile_debouncer)
-			ts_compile_debouncer = setTimeout(async () => {
-				const { diagnostics: ts_diagnostics = [] } = await ts_compile(js)
-				for(const d of ts_diagnostics) {
-					const mapped_start = coffee_source_map?.[d.range.start.line - 1]?.columns.find(Boolean)
-					const mapped_end = coffee_source_map?.[d.range.end.line - 1]?.columns.find(Boolean)
-					d.range = new Range(
-						new Position(mapped_start?.sourceLine || 0, 0),
-						new Position(mapped_end?.sourceLine || 0, Number.MAX_VALUE))
+			const { diagnostics: ts_diagnostics = [] } = await ts_compile(js)
+			const mapped_diagnostics = ts_diagnostics.map(d => {
+				// idk but both -1 and -0 were necessary in different files. not sure where my error is. I think -1 is the normal case
+				const mapped_start = (source_map[d.range.start.line-1]||source_map[d.range.start.line]||source_map[d.range.start.line+1])?.columns.find(Boolean)
+				const mapped_end = (source_map[d.range.end.line-1]||source_map[d.range.end.line]||source_map[d.range.end.line+1])?.columns.find(Boolean)
+				if(!mapped_start || !mapped_end)
+					throw new Error('could not sourcemap js back to cs')
+				return {
+					...d,
+					range: new Range(
+						new Position(mapped_start.sourceLine, 0),
+						new Position(mapped_end.sourceLine, Number.MAX_VALUE))
 				}
-				diagnostic_collection.set(active_document.uri, ts_diagnostics)
-			}, 10)
+			})
+			diagnostic_collection.set(active_document.uri, mapped_diagnostics)
 		}, 500)
 	}
 	subscriptions.push(workspace.onDidChangeTextDocument(change_event => {
@@ -156,7 +214,7 @@ function activate(/** @type {ExtensionContext} */ { subscriptions }) {
 			return
 		check_syntax()
 	}))
-	check_syntax()
+	subscriptions.push(workspace.onDidOpenTextDocument(check_syntax))
 
 	subscriptions.push(languages.registerCompletionItemProvider(language, {
 		async provideCompletionItems(document, real_coffee_position, token) {
@@ -195,7 +253,6 @@ function activate(/** @type {ExtensionContext} */ { subscriptions }) {
 			virtual_document_contents.set(original_uri, js)
 			// The `.js` is what makes vscode turn to tsserver for the completion request
 			const virtual_document_uri = Uri.parse(`${ext_identifier}://compiled/${encodeURIComponent(original_uri)}.js`)
-			// , context.triggerCharacter v todo
 			/** @type {CompletionList|undefined} */
 			const completion_list = await commands.executeCommand('vscode.executeCompletionItemProvider', virtual_document_uri, emulated_cursor_position)
 
@@ -218,4 +275,11 @@ function activate(/** @type {ExtensionContext} */ { subscriptions }) {
 		}
 	}, '.', '\"'))
 }
-module.exports = { activate }
+
+function deactivate() {
+	if (!client)
+		return undefined
+	return client.stop()
+}
+
+module.exports = { activate, deactivate }

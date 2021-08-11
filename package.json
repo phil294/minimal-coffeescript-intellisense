@@ -1,22 +1,18 @@
 {
-	"name": "coffeescript-intellisense",
-	"description": "IntelliSense for CoffeeScript based on its compiled JavaScript output",
+	"name": "minimal-coffeescript-intellisense",
+	"description": "Slow and bad IntelliSense for CoffeeScript based on its compiled JavaScript output. Not published on vscode extension marketplace. Please use https://github.com/phil294/coffeesense instead of this.",
 	"author": "phil294",
 	"license": "MIT",
-	"version": "0.0.1",
+	"version": "0.0.0",
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/phil294/coffeescript-intellisense"
+		"url": "https://github.com/phil294/minimal-coffeescript-intellisense"
 	},
 	"publisher": "vscode",
 	"categories": [],
 	"keywords": [
 		"CoffeeScript",
-		"IntelliSense",
-		"Autocomplete",
-		"Go To Definition",
-		"Diagnostics",
-		"(TODO)"
+		"IntelliSense"
 	],
 	"engines": {
 		"vscode": "^1.52.0"
@@ -33,11 +29,14 @@
 	},
 	"dependencies": {
 		"@ts-morph/bootstrap": "^0.10.1",
-		"coffeescript": "github:jashkenas/coffeescript#pull/5358/head",
+		"@types/coffeescript": "^2.5.0",
+		"coffeescript": "^2.5.1",
 		"eslint": "^7.31.0",
 		"jshashes": "^1.0.8",
 		"ts-morph": "^11.0.3",
 		"typescript": "^4.3.5",
-		"volatile-map": "1.0.2"
+		"typescript-language-server": "^0.5.4",
+		"volatile-map": "1.0.2",
+		"vscode-languageclient": "^7.0.0"
 	}
 }
